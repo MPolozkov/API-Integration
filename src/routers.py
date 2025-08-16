@@ -1,22 +1,21 @@
-from fastapi import HTTPException, Query, APIRouter, Request
-from fastapi.responses import RedirectResponse
-from typing import Optional
-import urllib.parse
+import os
+import urllib
+
+from fastapi import HTTPException, APIRouter, Request
+from urllib.parse import urlparse, urlunparse
 import httpx
-import json
 
+from dotenv import load_dotenv
 
-CLIENT_ID = "9f9bc5b3-998d-40ea-b538-b129c8412e83"
-CLIENT_SECRET = "XLwBUbenls6c7ebSJPlRyuQzGYiAl8zgt2blrAev"
-REDIRECT_URI = "https://127.0.0.1:8000/oauth2/callback"
-AUTHORIZE_URL = "https://gderabota.ru/oauth/authorize"
+load_dotenv()
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36',
-    "Content-Type": "application/json",
-}
+client_id = os.getenv("CLIENT_ID")
+client_secret = os.getenv("CLIENT_SECRET")
+redirect_uri = os.getenv("REDIRECT_URI")
 
-redirect_url_global = ""
+authorize_url = os.getenv("AUTHORIZE_URL")
+token_url = os.getenv("TOKEN_URL")
+
 
 router = APIRouter()
 
@@ -25,72 +24,79 @@ router = APIRouter()
 async def connection_api():
     """Создает URL для авторизации пользователя через OAuth2."""
     data = {
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
+        "scope": ""
     }
     encode_params = urllib.parse.urlencode(data)
-    full_url = f"{AUTHORIZE_URL}?{encode_params}"
+    full_url = f"{authorize_url}?{encode_params}"
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(full_url, headers=HEADERS, follow_redirects=False)
-            response.raise_for_status()
+    try:
+        return full_url
 
-            redirect_url_global = response.headers.get("Location")
-            if redirect_url_global:
-                return RedirectResponse(redirect_url_global)  # перенаправление
-            else:
-                raise HTTPException(status_code=500, detail="Location header not found")
-
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/login")
-async def login_submit(requests: Request, email: str):
-    """Получает данные с формы логина, отправляет их и редиректит обратно."""
-
-    global redirect_url_global
-
-    if not redirect_url_global:
-        raise HTTPException(status_code=400, detail="Redirect URL not available")
-
-    form_data = {
-        "email": email
-    }
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(redirect_url_global, data=form_data, follow_redirects=True)
-            response.raise_for_status()
-            return RedirectResponse(redirect_url_global)
-
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/oauth2/callback")
-async def oauth2_callback():
-    """Получает code и обменивает на access_token."""
-    token_data = {
-        "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        #"code": code,
+async def callback(request: Request):
+    """Обработчик callback-а OAuth2. Получает `code` из callback URL."""
+
+    try:
+        redirect_url = str(request.url)
+
+        parsed_url = urlparse(redirect_url)
+        url_http = urlunparse(parsed_url._replace(scheme='http'))
+
+        parsed_url = urllib.parse.urlparse(str(url_http))
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+
+        error = query_params.get('error', [None])[0]
+
+        if error:
+            error_description = query_params.get('error_description', [''])[0]
+            raise HTTPException(status_code=400, detail=f"Ошибка OAuth2: {error}. {error_description}")
+
+        code = query_params.get('code', [None])[0]
+        print(code)
+
+        if code:
+            return code
+        else:
+            raise HTTPException(status_code=400, detail="Code отсутствует в URL редиректа")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/oauth2/token")
+async def token(auth_code: str):
+    """Получение токена"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36',
+        "Content-Type": "application/json"
     }
+
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "code": auth_code
+    }
+
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(AUTHORIZE_URL, headers=HEADERS, json=token_data)
+            response = await client.post(token_url, headers=headers, json=data, follow_redirects=False)
             response.raise_for_status()
-            token = response.json()
-            return token # Возвращаем access_token, refresh_token
+            token_data = response.json()
+
+            return token_data
+
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=e.response.status_code, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-
